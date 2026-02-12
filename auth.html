@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>DA OAuth (token)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+</head>
+<body>
+  <h3>DonationAlerts OAuth</h3>
+  <p id="status">…</p>
+  <p><button id="login">Authorize</button></p>
+
+  <script>
+    // === НАСТРОЙКИ ===
+    const CLIENT_ID = "PASTE_APP_ID_HERE";
+    const REDIRECT_URI = location.origin + location.pathname; // this auth.html
+    const SCOPES = ["oauth-user-show", "oauth-donation-subscribe"].join(" ");
+
+    const statusEl = document.getElementById("status");
+    const loginBtn = document.getElementById("login");
+
+    function buildAuthUrl() {
+      const u = new URL("https://www.donationalerts.com/oauth/authorize");
+      u.searchParams.set("client_id", CLIENT_ID);
+      u.searchParams.set("redirect_uri", REDIRECT_URI);
+      u.searchParams.set("response_type", "token"); // implicit flow :contentReference[oaicite:4]{index=4}
+      u.searchParams.set("scope", SCOPES);
+      return u.toString();
+    }
+
+    function parseHash() {
+      // hash like: #access_token=...&token_type=Bearer&expires_in=...
+      const h = new URLSearchParams(location.hash.replace(/^#/, ""));
+      return {
+        access_token: h.get("access_token"),
+        expires_in: h.get("expires_in"),
+        token_type: h.get("token_type"),
+        error: h.get("error"),
+      };
+    }
+
+    (function init() {
+      const { access_token, error } = parseHash();
+
+      if (error) {
+        statusEl.textContent = "OAuth error: " + error;
+        return;
+      }
+
+      if (access_token) {
+        localStorage.setItem("da_access_token", access_token);
+        statusEl.textContent = "Token saved. Redirecting to overlay…";
+        // Переход рядом лежащий overlay.html (на том же домене, если GitHub Pages)
+        const overlayUrl = new URL("overlay.html", location.href);
+        location.replace(overlayUrl.toString());
+        return;
+      }
+
+      statusEl.textContent = "Нажми Authorize, потом токен сохранится и ты попадёшь на overlay.";
+      loginBtn.onclick = () => location.href = buildAuthUrl();
+    })();
+  </script>
+</body>
+</html>

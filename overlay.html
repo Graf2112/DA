@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>DA Win98 Alerts</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Важно: именно dist/min, чтобы не ловить missing woff2 -->
+  <link rel="stylesheet" href="https://unpkg.com/98.css@0.1.17/dist/98.min.css" />
+
+  <style>
+    body { margin:0; background:transparent; overflow:hidden; font-family:"MS Sans Serif", Tahoma, sans-serif; }
+    #dock { position:fixed; left:24px; bottom:24px; width:360px; }
+    .window { opacity:0; transform:translateY(12px); transition: opacity .18s ease, transform .18s ease; }
+    .window.show { opacity:1; transform:translateY(0); }
+    #msg { font-size:14px; line-height:1.25; white-space:pre-wrap; word-break:break-word; }
+    #meta { margin-top:8px; font-size:12px; opacity:.85; }
+    .title-bar-text::before { content:"💾 "; }
+    #debug { position:fixed; right:12px; bottom:12px; width:420px; max-height:40vh; overflow:auto; font:12px/1.2 monospace; background:rgba(0,0,0,.55); color:#fff; padding:8px; border-radius:8px; }
+  </style>
+</head>
+
+<body>
+  <div id="dock">
+    <div id="alertWin" class="window" style="max-width:360px;">
+      <div class="title-bar">
+        <div class="title-bar-text" id="title">Donation received</div>
+        <div class="title-bar-controls">
+          <button aria-label="Minimize" disabled></button>
+          <button aria-label="Maximize" disabled></button>
+          <button aria-label="Close" id="closeBtn"></button>
+        </div>
+      </div>
+      <div class="window-body">
+        <div id="msg"></div>
+        <div id="meta"></div>
+        <div style="margin-top:10px; display:flex; gap:8px; justify-content:flex-end;">
+          <button id="okBtn">OK</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="debug"></div>
+
+  <script>
+    // ====== Win98 Alert UI ======
+    const UI = {
+      win: document.getElementById("alertWin"),
+      title: document.getElementById("title"),
+      msg: document.getElementById("msg"),
+      meta: document.getElementById("meta"),
+      ok: document.getElementById("okBtn"),
+      close: document.getElementById("closeBtn"),
+      debug: document.getElementById("debug"),
+    };
+
+    const queue = [];
+    let showing = false;
+    let hideTimer = null;
+
+    function log(...a) {
+      const s = a.map(x => typeof x === "string" ? x : JSON.stringify(x)).join(" ");
+      UI.debug.textContent = (UI.debug.textContent + "\n" + s).trim();
+      UI.debug.scrollTop = UI.debug.scrollHeight;
+      console.log(...a);
+    }
+
+    function escapeText(s) {
+      return String(s ?? "").replace(/[&<>"']/g, c => ({
+        "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+      }[c]));
+    }
+
+    function showNext() {
+      if (showing || queue.length === 0) return;
+      showing = true;
+
+      const a = queue.shift();
+      UI.title.textContent = a.title;
+      UI.msg.innerHTML = escapeText(a.text);
+      UI.meta.textContent = a.meta ?? "";
+
+      UI.win.classList.add("show");
+
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(hideNow, a.durationMs ?? 8000);
+    }
+
+    function hideNow() {
+      UI.win.classList.remove("show");
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => {
+        showing = false;
+        showNext();
+      }, 220);
+    }
+
+    UI.ok.addEventListener("click", hideNow);
+    UI.close.addEventListener("click", hideNow);
+
+    function handleDonation(d) {
+      const user = d.username || d.name || "Anonymous";
+      const amount = `${d.amount ?? ""} ${d.currency ?? ""}`.trim();
+      const text = `${user} donated ${amount}\n\n${d.message || ""}`.trim();
+
+      queue.push({
+        title: "Donation received",
+        text,
+        meta: new Date().toLocaleTimeString(),
+        durationMs: 9000
+      });
+      showNext();
+    }
+
+    // ====== DonationAlerts realtime (Variant B) ======
+    const ACCESS_TOKEN = localStorage.getItem("da_access_token");
+    if (!ACCESS_TOKEN) {
+      log("No access token. Open auth.html first.");
+      // Можно просто открыть auth.html вручную
+    }
+
+    async function daGetUserOAuth() {
+      // GET https://www.donationalerts.com/api/v1/user/oauth :contentReference[oaicite:9]{index=9}
+      const r = await fetch("https://www.donationalerts.com/api/v1/user/oauth", {
+        headers: { "Authorization": `Bearer ${ACCESS_TOKEN}` }
+      });
+      if (!r.ok) throw new Error("user/oauth failed: " + r.status);
+      return r.json();
+    }
+
+    async function daCentrifugeSubscribe(clientId, channel) {
+      // POST https://www.donationalerts.com/api/v1/centrifuge/subscribe :contentReference[oaicite:10]{index=10}
+      const r = await fetch("https://www.donationalerts.com/api/v1/centrifuge/subscribe", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${ACCESS_TOKEN}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ channels: [channel], client: clientId })
+      });
+      if (!r.ok) throw new Error("centrifuge/subscribe failed: " + r.status);
+      return r.json();
+    }
+
+    function centrifugoConnect(socketToken) {
+      // wss://centrifugo.donationalerts.com/connection/websocket :contentReference[oaicite:11]{index=11}
+      return new Promise((resolve, reject) => {
+        const ws = new WebSocket("wss://centrifugo.donationalerts.com/connection/websocket");
+        ws.onopen = () => {
+          // Step 1 connect message :contentReference[oaicite:12]{index=12}
+          ws.send(JSON.stringify({ params: { token: socketToken }, id: 1 }));
+        };
+        ws.onerror = (e) => reject(e);
+        ws.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+
+            // connect response has: {id:1, result:{client:"uuid", version:"..."}} :contentReference[oaicite:13]{index=13}
+            if (msg?.id === 1 && msg?.result?.client) {
+              resolve({ ws, clientId: msg.result.client });
+              return;
+            }
+          } catch {}
+        };
+      });
+    }
+
+    function centrifugoSubscribe(ws, channel, token) {
+      // Step 3 subscribe message :contentReference[oaicite:14]{index=14}
+      ws.send(JSON.stringify({
+        params: { channel, token },
+        method: 1,
+        id: 2
+      }));
+    }
+
+    function isDonationPublication(msg) {
+      // Формат публикаций у Centrifugo обычно приходит как "result" с type/channel/data.
+      // В DA docs явно приведён пример "type:1" на confirm, а публикации идут иначе — поэтому парсим осторожно.
+      const r = msg?.result;
+      if (!r) return null;
+
+      // Внутри может лежать donation resource "data" (как в Donations Alerts List). :contentReference[oaicite:15]{index=15}
+      const maybe = r?.data?.data || r?.data || r;
+      // donation выглядит как объект с amount/currency/message/username
+      if (maybe && typeof maybe === "object" && ("amount" in maybe) && ("currency" in maybe)) return maybe;
+      return null;
+    }
+
+    async function start() {
+      if (!ACCESS_TOKEN) return;
+
+      log("1) Fetch user/oauth…");
+      const user = await daGetUserOAuth();
+      const userId = user?.data?.id;
+      const socketToken = user?.data?.socket_connection_token; // :contentReference[oaicite:16]{index=16}
+      if (!userId || !socketToken) throw new Error("No userId/socket_connection_token");
+
+      const channel = `$alerts:donation_${userId}`; // :contentReference[oaicite:17]{index=17}
+      log("userId =", userId, "channel =", channel);
+
+      log("2) Connect centrifugo…");
+      const { ws, clientId } = await centrifugoConnect(socketToken);
+      log("centrifugo clientId =", clientId);
+
+      log("3) Get channel connection token…");
+      const sub = await daCentrifugeSubscribe(clientId, channel);
+      const connectionToken = sub?.channels?.[0]?.token; // :contentReference[oaicite:18]{index=18}
+      if (!connectionToken) throw new Error("No connection token");
+
+      log("4) Subscribe WS…");
+      centrifugoSubscribe(ws, channel, connectionToken);
+
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+
+        const donation = isDonationPublication(msg);
+        if (donation) {
+          log("Donation event:", donation);
+          handleDonation(donation);
+        }
+      };
+
+      ws.onclose = () => log("WS closed");
+      ws.onerror = (e) => log("WS error", e);
+    }
+
+    // Тест
+    window.__test = () => handleDonation({ username:"Graf2112", amount:100, currency:"RUB", message:"Windows 98 moment." });
+
+    start().catch(e => log("Fatal:", e.message || e));
+  </script>
+</body>
+</html>
